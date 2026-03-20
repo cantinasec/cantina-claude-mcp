@@ -43,15 +43,19 @@ function getConfig() {
   }
   return { apiKey, apiUrl };
 }
-async function cantinaApiRequest(config, path2) {
-  const url = `${config.apiUrl}${path2}`;
-  const response = await fetch(url, {
-    method: "GET",
+async function cantinaApiRequest(config, apiPath, { method = "GET", body } = {}) {
+  const url = `${config.apiUrl}${apiPath}`;
+  const options = {
+    method,
     headers: {
       Authorization: `Bearer ${config.apiKey}`,
       "Content-Type": "application/json"
     }
-  });
+  };
+  if (body && method !== "GET") {
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(url, options);
   let data;
   const text = await response.text();
   try {
@@ -60,6 +64,15 @@ async function cantinaApiRequest(config, path2) {
     data = text;
   }
   return { ok: response.ok, status: response.status, data };
+}
+function errorResult(text) {
+  return { content: [{ type: "text", text }], isError: true };
+}
+function jsonResult(data) {
+  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+}
+function apiErrorResult(result) {
+  return errorResult(`Cantina API error (${result.status}): ${JSON.stringify(result.data)}`);
 }
 function parseCantinaUrl(url) {
   try {
@@ -123,6 +136,56 @@ var TOOLS = [
         }
       },
       required: ["repo_id"]
+    }
+  },
+  // ── Finding Comments ──
+  {
+    name: "cantina_list_finding_comments",
+    description: "List comments on a finding in a Cantina repository. Uses the finding events endpoint and filters to only return comments (excluding status changes and other events). Each comment includes the author, content (Markdown), visibility, reactions, replies, and timestamps.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo_id: {
+          type: "string",
+          description: "Repository UUID (required)"
+        },
+        finding_ref: {
+          type: "string",
+          description: "Finding number or ID within the repository (required)"
+        }
+      },
+      required: ["repo_id", "finding_ref"]
+    }
+  },
+  {
+    name: "cantina_add_finding_comment",
+    description: "Add a comment to an existing finding in a Cantina repository. The comment content should be valid Markdown. You can ping users with @username (for auditors/reviewers/judges/triagers in the repo) or @project (for all company users). Set visibility to control who can see the comment. Use parent to reply to an existing comment thread.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo_id: {
+          type: "string",
+          description: "Repository UUID (required)"
+        },
+        finding_ref: {
+          type: "string",
+          description: "Finding number or ID within the repository (required)"
+        },
+        content: {
+          type: "string",
+          description: "Comment content in Markdown (required)"
+        },
+        visibility: {
+          type: "string",
+          enum: ["public", "private", "internal", "hidden"],
+          description: "Comment visibility. 'public' = visible to all repo users, 'private' = visible to your team only, 'internal' = visible to judges/triagers/admins only, 'hidden' = hidden from all except admins. Defaults to public. Reviewers can only create public comments."
+        },
+        parent: {
+          type: "string",
+          description: "UUID of the parent comment to reply to. Creates a threaded reply. Threads are one level deep."
+        }
+      },
+      required: ["repo_id", "finding_ref", "content"]
     }
   }
 ];
@@ -210,12 +273,45 @@ async function handleListFindings(config, args) {
     content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }]
   };
 }
+async function handleListFindingComments(config, args) {
+  const { repo_id, finding_ref } = args;
+  if (!repo_id || !finding_ref) {
+    return errorResult("Both 'repo_id' and 'finding_ref' are required.");
+  }
+  const result = await cantinaApiRequest(
+    config,
+    `/api/v0/repositories/${repo_id}/findings/${finding_ref}/events`
+  );
+  if (!result.ok) return apiErrorResult(result);
+  const comments = (result.data.events || []).filter(e => e.type === "comment");
+  return jsonResult(comments);
+}
+async function handleAddFindingComment(config, args) {
+  const { repo_id, finding_ref, content, visibility, parent } = args;
+  if (!repo_id || !finding_ref || !content) {
+    return errorResult("'repo_id', 'finding_ref', and 'content' are required.");
+  }
+  const body = { content };
+  if (visibility) body.visibility = visibility;
+  if (parent) body.parent = parent;
+  const result = await cantinaApiRequest(
+    config,
+    `/api/v0/repositories/${repo_id}/findings/${finding_ref}/comment`,
+    { method: "POST", body }
+  );
+  if (!result.ok) return apiErrorResult(result);
+  return jsonResult(result.data);
+}
 async function handleToolCall(config, name, args) {
   switch (name) {
     case "cantina_get_finding":
       return handleGetFinding(config, args);
     case "cantina_list_findings":
       return handleListFindings(config, args);
+    case "cantina_list_finding_comments":
+      return handleListFindingComments(config, args);
+    case "cantina_add_finding_comment":
+      return handleAddFindingComment(config, args);
     default:
       return {
         content: [{ type: "text", text: `Unknown tool: ${name}` }],
