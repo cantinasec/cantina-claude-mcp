@@ -35,14 +35,107 @@ function loadEnvFile() {
 function getConfig() {
   loadEnvFile();
   const apiKey = process.env.CANTINA_API_KEY;
-  const apiUrl = process.env.CANTINA_API_URL || "https://cantina.xyz";
+  const apiUrl = (process.env.CANTINA_API_URL || "https://api.cantina.xyz").replace(/\/+$/, "");
   if (!apiKey) {
     throw new Error(
       "CANTINA_API_KEY is required. Set it in your shell environment or in a .env file in the plugin directory."
     );
   }
-  return { apiKey, apiUrl };
+  const rateLimitRpm = positiveInt(process.env.CANTINA_API_RATE_LIMIT_RPM, 120);
+  return {
+    apiKey,
+    apiUrl,
+    cacheTtlMs: nonNegativeInt(process.env.CANTINA_API_CACHE_TTL_MS, 6e4),
+    maxRetries: nonNegativeInt(process.env.CANTINA_API_MAX_RETRIES, 4),
+    minRequestIntervalMs: Math.ceil(6e4 / rateLimitRpm),
+    rateLimitRpm,
+    retryBaseMs: positiveInt(process.env.CANTINA_API_RETRY_BASE_MS, 1e3),
+    timeoutMs: positiveInt(process.env.CANTINA_API_TIMEOUT_MS, 3e4)
+  };
 }
+function positiveInt(value, fallback) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+function nonNegativeInt(value, fallback) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+let requestQueue = Promise.resolve();
+let nextRequestAt = 0;
+async function scheduleApiRequest(config, run) {
+  const task = requestQueue.then(async () => {
+    const waitMs = Math.max(0, nextRequestAt - Date.now());
+    if (waitMs > 0) await sleep(waitMs);
+    nextRequestAt = Date.now() + config.minRequestIntervalMs;
+    return run();
+  });
+  requestQueue = task.catch(() => {
+  });
+  return task;
+}
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function parseRetryAfter(response) {
+  const retryAfter = response.headers.get("retry-after");
+  if (!retryAfter) return null;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1e3);
+  const timestamp = Date.parse(retryAfter);
+  if (Number.isFinite(timestamp)) return Math.max(0, timestamp - Date.now());
+  return null;
+}
+function retryDelayMs(config, attempt, retryAfterMs) {
+  if (retryAfterMs !== null && retryAfterMs !== void 0) return retryAfterMs;
+  const backoff = Math.min(3e4, config.retryBaseMs * 2 ** attempt);
+  const jitter = Math.floor(Math.random() * 250);
+  return backoff + jitter;
+}
+function shouldRetry(result) {
+  return result.status === 0 || result.status === 429 || result.status === 502 || result.status === 503 || result.status === 504;
+}
+async function performApiRequest(config, url, options) {
+  try {
+    const response = await fetchWithTimeout(url, options, config.timeoutMs);
+    let data;
+    const text = await response.text();
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      data,
+      retryAfterMs: parseRetryAfter(response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      statusText: "Request failed",
+      data: {
+        type: "request_failed",
+        msg: error instanceof Error ? error.message : "Request failed"
+      },
+      retryAfterMs: null
+    };
+  }
+}
+const responseCache = /* @__PURE__ */ new Map();
+const inFlightRequests = /* @__PURE__ */ new Map();
 async function cantinaApiRequest(config, apiPath, { method = "GET", body } = {}) {
   const url = `${config.apiUrl}${apiPath}`;
   const options = {
@@ -55,15 +148,42 @@ async function cantinaApiRequest(config, apiPath, { method = "GET", body } = {})
   if (body && method !== "GET") {
     options.body = JSON.stringify(body);
   }
-  const response = await fetch(url, options);
-  let data;
-  const text = await response.text();
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = text;
+  const cacheKey = method === "GET" ? url : null;
+  if (cacheKey && config.cacheTtlMs > 0) {
+    const cached = responseCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { ...cached.result, cached: true };
+    }
+    responseCache.delete(cacheKey);
   }
-  return { ok: response.ok, status: response.status, data };
+  if (cacheKey && inFlightRequests.has(cacheKey)) {
+    return inFlightRequests.get(cacheKey);
+  }
+  const request = scheduleApiRequest(config, async () => {
+    let result;
+    for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+      result = await performApiRequest(config, url, options);
+      result.attempts = attempt + 1;
+      if (result.ok || !shouldRetry(result) || attempt === config.maxRetries) break;
+      await sleep(retryDelayMs(config, attempt, result.retryAfterMs));
+    }
+    if (cacheKey && result?.ok && config.cacheTtlMs > 0) {
+      responseCache.set(cacheKey, {
+        expiresAt: Date.now() + config.cacheTtlMs,
+        result
+      });
+    }
+    return result;
+  });
+  if (cacheKey) {
+    inFlightRequests.set(cacheKey, request);
+    try {
+      return await request;
+    } finally {
+      inFlightRequests.delete(cacheKey);
+    }
+  }
+  return request;
 }
 function errorResult(text) {
   return { content: [{ type: "text", text }], isError: true };
@@ -72,7 +192,23 @@ function jsonResult(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
 function apiErrorResult(result) {
-  return errorResult(`Cantina API error (${result.status}): ${JSON.stringify(result.data)}`);
+  if (result.status === 429) {
+    return errorResult(
+      `Cantina API rate limit reached (429) after ${result.attempts || 1} attempt(s). Requests are serialized and retried with backoff, but Cantina still rejected this request. Try again shortly, avoid bulk fetching individual findings, or lower CANTINA_API_RATE_LIMIT_RPM.`
+    );
+  }
+  if (result.status === 0) {
+    return errorResult(`Cantina API request failed: ${formatApiErrorData(result.data)}`);
+  }
+  return errorResult(`Cantina API error (${result.status}): ${formatApiErrorData(result.data)}`);
+}
+function formatApiErrorData(data) {
+  if (typeof data !== "string") return JSON.stringify(data);
+  const compact = data.replace(/\s+/g, " ").trim();
+  if (compact.startsWith("<html") || compact.includes("<title>429 Too Many Requests</title>")) {
+    return "HTML error response from upstream proxy";
+  }
+  return compact.length > 500 ? `${compact.slice(0, 500)}...` : compact;
 }
 function parseCantinaUrl(url) {
   try {
@@ -89,7 +225,7 @@ function parseCantinaUrl(url) {
 var TOOLS = [
   {
     name: "cantina_get_finding",
-    description: "IMPORTANT: Always use this tool for cantina.xyz URLs. Do NOT use WebFetch or Fetch for cantina.xyz \u2014 the site requires authentication and will redirect to a login page. This tool authenticates via API key.\n\nGet a security finding from Cantina by URL or by repo_id + finding_ref. Returns the finding title, description, severity, status, category, related files, and other metadata.",
+    description: "IMPORTANT: Always use this tool for cantina.xyz URLs. Do NOT use WebFetch or Fetch for cantina.xyz \u2014 the site requires authentication and will redirect to a login page. This tool authenticates via API key.\n\nGet one specific security finding from Cantina by URL or by repo_id + finding_ref. Returns the finding title, description, severity, status, category, related files, and other metadata. For browsing or bulk work, call cantina_list_findings first and avoid repeatedly fetching individual findings unless the full details are needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -110,7 +246,7 @@ var TOOLS = [
   },
   {
     name: "cantina_list_findings",
-    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata. Use this to browse findings, filter by severity or status, or look for patterns across a repository's findings. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
+    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata. Use this for browsing, filtering, bulk triage, or looking for patterns across a repository's findings. Prefer this over many cantina_get_finding calls. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -133,6 +269,14 @@ var TOOLS = [
         limit: {
           type: "number",
           description: "Maximum number of findings to return (default: 20, max: 100)"
+        },
+        next: {
+          type: "string",
+          description: "Pagination token from the previous response's nextValue field"
+        },
+        with_files: {
+          type: "boolean",
+          description: "Whether to include related_files. Set false when browsing lists to reduce response size."
         }
       },
       required: ["repo_id"]
@@ -227,17 +371,7 @@ Expected format: https://cantina.xyz/code/{repoId}/findings/{findingRef}`
     config,
     `/api/v0/repositories/${repoId}/findings/${findingRef}`
   );
-  if (!result.ok) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Cantina API error (${result.status}): ${JSON.stringify(result.data)}`
-        }
-      ],
-      isError: true
-    };
-  }
+  if (!result.ok) return apiErrorResult(result);
   return {
     content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }]
   };
@@ -255,20 +389,12 @@ async function handleListFindings(config, args) {
   if (args.status) params.append("status", args.status);
   if (args.duplicates !== void 0) params.append("duplicates", String(args.duplicates));
   if (args.limit) params.append("limit", String(args.limit));
+  if (args.next) params.append("next", args.next);
+  if (args.with_files !== void 0) params.append("with_files", String(args.with_files));
   const queryString = params.toString();
   const path2 = `/api/v0/repositories/${repoId}/findings${queryString ? `?${queryString}` : ""}`;
   const result = await cantinaApiRequest(config, path2);
-  if (!result.ok) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Cantina API error (${result.status}): ${JSON.stringify(result.data)}`
-        }
-      ],
-      isError: true
-    };
-  }
+  if (!result.ok) return apiErrorResult(result);
   return {
     content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }]
   };

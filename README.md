@@ -58,7 +58,12 @@ Add a comment to finding 42: "This looks like a reentrancy issue in the withdraw
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `CANTINA_API_KEY` | Yes | — | Your Cantina API key |
-| `CANTINA_API_URL` | No | `https://cantina.xyz` | Cantina API base URL |
+| `CANTINA_API_URL` | No | `https://api.cantina.xyz` | Cantina API base URL |
+| `CANTINA_API_RATE_LIMIT_RPM` | No | `120` | Maximum Cantina API requests per minute from this MCP process |
+| `CANTINA_API_MAX_RETRIES` | No | `4` | Retry attempts for rate limits and transient upstream failures |
+| `CANTINA_API_RETRY_BASE_MS` | No | `1000` | Initial retry backoff in milliseconds |
+| `CANTINA_API_CACHE_TTL_MS` | No | `60000` | In-process cache TTL for successful GET responses |
+| `CANTINA_API_TIMEOUT_MS` | No | `30000` | Request timeout in milliseconds |
 
 ## Managing the MCP server
 
