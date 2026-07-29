@@ -110,7 +110,7 @@ var TOOLS = [
   },
   {
     name: "cantina_list_findings",
-    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata. Use this to browse findings, filter by severity or status, or look for patterns across a repository's findings. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
+    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata; each finding includes its labels ({id, name, description, color}). Use this to browse findings, filter by severity, status, or label, or look for patterns across a repository's findings. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -125,6 +125,10 @@ var TOOLS = [
         status: {
           type: "string",
           description: "Comma-separated status filter, e.g. 'confirmed,fixed'. Values: new, in_review, disputed, rejected, spam, duplicate, confirmed, acknowledged, fixed, withdrawn"
+        },
+        label: {
+          type: "string",
+          description: "Comma-separated label name filter (OR logic), e.g. 'Client opinion needed'. Label names are matched case-insensitively; findings matching any listed label are returned. Unknown labels return an empty result, not an error."
         },
         duplicates: {
           type: "boolean",
@@ -253,6 +257,7 @@ async function handleListFindings(config, args) {
   const params = new URLSearchParams();
   if (args.severity) params.append("severity", args.severity);
   if (args.status) params.append("status", args.status);
+  if (args.label) params.append("label", args.label);
   if (args.duplicates !== void 0) params.append("duplicates", String(args.duplicates));
   if (args.limit) params.append("limit", String(args.limit));
   const queryString = params.toString();
