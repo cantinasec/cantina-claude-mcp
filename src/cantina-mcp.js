@@ -110,7 +110,7 @@ var TOOLS = [
   },
   {
     name: "cantina_list_findings",
-    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata; each finding includes its labels ({id, name, description, color}). Use this to browse findings, filter by severity, status, or label, or look for patterns across a repository's findings. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
+    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata; each finding includes its labels ({id, name, description, color}). The response's filteredTotal is the total number of findings matching the current filters, and nextValue is a pagination cursor \u2014 if present, more results remain; pass it back as 'next' to continue. Use this to browse findings, filter by severity, status, or label, or look for patterns across a repository's findings. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -137,6 +137,10 @@ var TOOLS = [
         limit: {
           type: "number",
           description: "Maximum number of findings to return (default: 20, max: 100)"
+        },
+        next: {
+          type: "string",
+          description: "Pagination cursor from a previous response's nextValue. Pass it back with the same filters to fetch the next page."
         }
       },
       required: ["repo_id"]
@@ -260,6 +264,7 @@ async function handleListFindings(config, args) {
   if (args.label) params.append("label", args.label);
   if (args.duplicates !== void 0) params.append("duplicates", String(args.duplicates));
   if (args.limit) params.append("limit", String(args.limit));
+  if (args.next) params.append("next", args.next);
   const queryString = params.toString();
   const path2 = `/api/v0/repositories/${repoId}/findings${queryString ? `?${queryString}` : ""}`;
   const result = await cantinaApiRequest(config, path2);
