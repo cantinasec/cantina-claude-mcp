@@ -110,7 +110,7 @@ var TOOLS = [
   },
   {
     name: "cantina_list_findings",
-    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata. Use this to browse findings, filter by severity or status, or look for patterns across a repository's findings. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
+    description: "List and filter security findings in a Cantina repository. Returns a paginated list of findings with metadata; each finding includes its labels ({id, name, description, color}). The response's filteredTotal is the total number of findings matching the current filters, and nextValue is a pagination cursor \u2014 if present, more results remain; pass it back as 'next' to continue. Use this to browse findings, filter by severity, status, or label, or look for patterns across a repository's findings. Do NOT use WebFetch for cantina.xyz \u2014 always use this tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -126,6 +126,10 @@ var TOOLS = [
           type: "string",
           description: "Comma-separated status filter, e.g. 'confirmed,fixed'. Values: new, in_review, disputed, rejected, spam, duplicate, confirmed, acknowledged, fixed, withdrawn"
         },
+        label: {
+          type: "string",
+          description: "Comma-separated label name filter (OR logic), e.g. 'Client opinion needed'. Label names are matched case-insensitively; findings matching any listed label are returned. Unknown labels return an empty result, not an error."
+        },
         duplicates: {
           type: "boolean",
           description: "Include duplicate findings (default: true)"
@@ -133,6 +137,10 @@ var TOOLS = [
         limit: {
           type: "number",
           description: "Maximum number of findings to return (default: 20, max: 100)"
+        },
+        next: {
+          type: "string",
+          description: "Pagination cursor from a previous response's nextValue. Pass it back with the same filters to fetch the next page."
         }
       },
       required: ["repo_id"]
@@ -186,6 +194,28 @@ var TOOLS = [
         }
       },
       required: ["repo_id", "finding_ref", "content"]
+    }
+  },
+  // ── Repositories ──
+  {
+    name: "cantina_list_repositories",
+    description: "List the Cantina repositories your API key can access. Use this to discover repository UUIDs for the other tools instead of needing to know them in advance. Returns compact summaries (id, name, kind, status, company, engagement, reward pot, timeframe, totalFindings). For a cross-repo findings view, call this first, then call cantina_list_findings per repository id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          description: "Filter by repository kind. Values: scoping, collaborative_review, private_contest, public_contest, private_bounty, public_bounty. IMPORTANT: use 'public_bounty' or 'private_bounty', NOT 'bounty' (returns 400)"
+        },
+        status: {
+          type: "string",
+          description: "Filter by status. Values: draft, upcoming, live, judging, escalations, escalations_ended, complete, published"
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of repositories to return (default: 50; applied after fetching - the API returns all accessible repositories). The response's total is the number of matching repositories before this limit is applied."
+        }
+      }
     }
   }
 ];
@@ -253,8 +283,10 @@ async function handleListFindings(config, args) {
   const params = new URLSearchParams();
   if (args.severity) params.append("severity", args.severity);
   if (args.status) params.append("status", args.status);
+  if (args.label) params.append("label", args.label);
   if (args.duplicates !== void 0) params.append("duplicates", String(args.duplicates));
   if (args.limit) params.append("limit", String(args.limit));
+  if (args.next) params.append("next", args.next);
   const queryString = params.toString();
   const path2 = `/api/v0/repositories/${repoId}/findings${queryString ? `?${queryString}` : ""}`;
   const result = await cantinaApiRequest(config, path2);
@@ -302,6 +334,37 @@ async function handleAddFindingComment(config, args) {
   if (!result.ok) return apiErrorResult(result);
   return jsonResult(result.data);
 }
+async function handleListRepositories(config, args) {
+  const params = new URLSearchParams();
+  if (args.kind) params.append("kind", args.kind);
+  if (args.status) params.append("status", args.status);
+  const queryString = params.toString();
+  const result = await cantinaApiRequest(
+    config,
+    `/api/v0/repositories${queryString ? `?${queryString}` : ""}`
+  );
+  if (!result.ok) return apiErrorResult(result);
+  if (!Array.isArray(result.data)) {
+    return errorResult(
+      `Unexpected response from /repositories (expected an array): ${JSON.stringify(result.data).slice(0, 300)}`
+    );
+  }
+  const repos = result.data.map((r) => ({
+    id: r.id,
+    name: r.name,
+    kind: r.kind,
+    status: r.status,
+    companyName: r.company?.name || null,
+    engagementId: r.engagementId,
+    totalRewardPot: r.totalRewardPot,
+    currencyCode: r.currencyCode,
+    timeframe: r.timeframe,
+    totalFindings: r.totalFindings
+  }));
+  const limit = Number.isInteger(args.limit) && args.limit > 0 ? args.limit : 50;
+  const limited = repos.slice(0, limit);
+  return jsonResult({ repositories: limited, count: limited.length, total: repos.length });
+}
 async function handleToolCall(config, name, args) {
   switch (name) {
     case "cantina_get_finding":
@@ -312,6 +375,8 @@ async function handleToolCall(config, name, args) {
       return handleListFindingComments(config, args);
     case "cantina_add_finding_comment":
       return handleAddFindingComment(config, args);
+    case "cantina_list_repositories":
+      return handleListRepositories(config, args);
     default:
       return {
         content: [{ type: "text", text: `Unknown tool: ${name}` }],
