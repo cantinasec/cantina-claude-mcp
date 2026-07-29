@@ -195,6 +195,28 @@ var TOOLS = [
       },
       required: ["repo_id", "finding_ref", "content"]
     }
+  },
+  // ── Repositories ──
+  {
+    name: "cantina_list_repositories",
+    description: "List the Cantina repositories your API key can access. Use this to discover repository UUIDs for the other tools instead of needing to know them in advance. Returns compact summaries (id, name, kind, status, company, engagement, reward pot, timeframe, totalFindings). For a cross-repo findings view, call this first, then call cantina_list_findings per repository id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          description: "Filter by repository kind. Values: scoping, collaborative_review, private_contest, public_contest, private_bounty, public_bounty. IMPORTANT: use 'public_bounty' or 'private_bounty', NOT 'bounty' (returns 400)"
+        },
+        status: {
+          type: "string",
+          description: "Filter by status. Values: draft, upcoming, live, judging, escalations, escalations_ended, complete, published"
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of repositories to return (applied after fetching; the API returns all accessible repositories)"
+        }
+      }
+    }
   }
 ];
 async function handleGetFinding(config, args) {
@@ -312,6 +334,32 @@ async function handleAddFindingComment(config, args) {
   if (!result.ok) return apiErrorResult(result);
   return jsonResult(result.data);
 }
+async function handleListRepositories(config, args) {
+  const params = new URLSearchParams();
+  if (args.kind) params.append("kind", args.kind);
+  if (args.status) params.append("status", args.status);
+  const queryString = params.toString();
+  const result = await cantinaApiRequest(
+    config,
+    `/api/v0/repositories${queryString ? `?${queryString}` : ""}`
+  );
+  if (!result.ok) return apiErrorResult(result);
+  const raw = Array.isArray(result.data) ? result.data : [];
+  const repos = raw.map((r) => ({
+    id: r.id,
+    name: r.name,
+    kind: r.kind,
+    status: r.status,
+    companyName: r.company?.name || null,
+    engagementId: r.engagementId,
+    totalRewardPot: r.totalRewardPot,
+    currencyCode: r.currencyCode,
+    timeframe: r.timeframe,
+    totalFindings: r.totalFindings
+  }));
+  const limited = args.limit ? repos.slice(0, args.limit) : repos;
+  return jsonResult({ repositories: limited, count: limited.length });
+}
 async function handleToolCall(config, name, args) {
   switch (name) {
     case "cantina_get_finding":
@@ -322,6 +370,8 @@ async function handleToolCall(config, name, args) {
       return handleListFindingComments(config, args);
     case "cantina_add_finding_comment":
       return handleAddFindingComment(config, args);
+    case "cantina_list_repositories":
+      return handleListRepositories(config, args);
     default:
       return {
         content: [{ type: "text", text: `Unknown tool: ${name}` }],
