@@ -213,7 +213,7 @@ var TOOLS = [
         },
         limit: {
           type: "number",
-          description: "Maximum number of repositories to return (applied after fetching; the API returns all accessible repositories). The response's total is the number of matching repositories before this limit is applied."
+          description: "Maximum number of repositories to return (default: 50; applied after fetching - the API returns all accessible repositories). The response's total is the number of matching repositories before this limit is applied."
         }
       }
     }
@@ -344,8 +344,12 @@ async function handleListRepositories(config, args) {
     `/api/v0/repositories${queryString ? `?${queryString}` : ""}`
   );
   if (!result.ok) return apiErrorResult(result);
-  const raw = Array.isArray(result.data) ? result.data : [];
-  const repos = raw.map((r) => ({
+  if (!Array.isArray(result.data)) {
+    return errorResult(
+      `Unexpected response from /repositories (expected an array): ${JSON.stringify(result.data).slice(0, 300)}`
+    );
+  }
+  const repos = result.data.map((r) => ({
     id: r.id,
     name: r.name,
     kind: r.kind,
@@ -357,7 +361,8 @@ async function handleListRepositories(config, args) {
     timeframe: r.timeframe,
     totalFindings: r.totalFindings
   }));
-  const limited = Number.isInteger(args.limit) && args.limit > 0 ? repos.slice(0, args.limit) : repos;
+  const limit = Number.isInteger(args.limit) && args.limit > 0 ? args.limit : 50;
+  const limited = repos.slice(0, limit);
   return jsonResult({ repositories: limited, count: limited.length, total: repos.length });
 }
 async function handleToolCall(config, name, args) {
