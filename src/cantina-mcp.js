@@ -213,7 +213,7 @@ var TOOLS = [
         },
         limit: {
           type: "number",
-          description: "Maximum number of repositories to return (applied after fetching; the API returns all accessible repositories)"
+          description: "Maximum number of repositories to return (applied after fetching; the API returns all accessible repositories). The response's total is the number of matching repositories before this limit is applied."
         }
       }
     }
@@ -357,8 +357,8 @@ async function handleListRepositories(config, args) {
     timeframe: r.timeframe,
     totalFindings: r.totalFindings
   }));
-  const limited = args.limit ? repos.slice(0, args.limit) : repos;
-  return jsonResult({ repositories: limited, count: limited.length });
+  const limited = Number.isInteger(args.limit) && args.limit > 0 ? repos.slice(0, args.limit) : repos;
+  return jsonResult({ repositories: limited, count: limited.length, total: repos.length });
 }
 async function handleToolCall(config, name, args) {
   switch (name) {
